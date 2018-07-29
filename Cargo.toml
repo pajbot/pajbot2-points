@@ -1,0 +1,6 @@
+[package]
+name = "pajbot2-points"
+version = "0.1.0"
+authors = ["Rasmus Karlsson <rasmus.karlsson@pajlada.com>"]
+
+[dependencies]

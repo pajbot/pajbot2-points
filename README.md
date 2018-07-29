@@ -1,0 +1,2 @@
+# pajbot2-points
+
