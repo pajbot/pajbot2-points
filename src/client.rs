@@ -25,11 +25,21 @@ pub struct EditPoints {
     pub response_sender: Sender<u64>,
 }
 
+pub struct BulkEdit {
+    pub channel_name: String,
+
+    pub user_ids: Vec<String>,
+
+    // How many points to edit (positive for add, negative for remove)
+    pub points: i32,
+}
+
 pub enum Command {
     GetPoints(GetPoints),
     EditPoints(EditPoints),
     SavePoints,
     Quit,
+    BulkEdit(BulkEdit),
 }
 
 pub struct Client {
@@ -92,6 +102,9 @@ impl Client {
                 let response = self.handle_edit_points(body.to_vec())?;
                 self.respond(response)?;
             }
+            COMMAND_BULK_EDIT => {
+                self.handle_bulk_edit(body.to_vec())?;
+            }
             _ => println!("Unknown command {}", command),
         }
 
@@ -145,5 +158,25 @@ impl Client {
         let points: u64 = receiver.recv().unwrap();
 
         return Ok(u64_to_buf(points).to_vec());
+    }
+
+    fn handle_bulk_edit(&mut self, buffer: Vec<u8>) -> Result<(), MyError> {
+        // Read points from 4 first bytes
+        let points = buf_to_i32_unsafe(&buffer[0..4]);
+
+        // Read user ID into a string from remaining bytes
+        let user_ids = parse_user_id_bulk(buffer[4..].to_vec())?;
+
+        println!("bulk edit points xd {:?}", user_ids);
+
+        self.request_sender
+            .send(Command::BulkEdit(BulkEdit {
+                channel_name: self.channel_name.clone(),
+                user_ids: user_ids,
+                points: points,
+            }))
+            .unwrap();
+
+        return Ok(());
     }
 }

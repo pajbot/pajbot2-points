@@ -58,6 +58,43 @@ fn save_points(points: &mut PointMap) -> io::Result<()> {
     return Ok(());
 }
 
+fn add_points(channel_points: &mut ChannelPointMap, user_id: String, points: u64) -> u64 {
+    let user_points = channel_points.entry(user_id).or_insert(0);
+
+    *user_points += points;
+
+    return *user_points;
+}
+
+fn remove_points(channel_points: &mut ChannelPointMap, user_id: String, points: i32) -> u64 {
+    let user_points = channel_points.entry(user_id).or_insert(0);
+
+    let points_u64: u64 = points.abs() as u64;
+    if points_u64 > *user_points {
+        *user_points = 0;
+    } else {
+        *user_points -= points_u64;
+    }
+
+    return *user_points;
+}
+
+fn get_points(channel_points: &mut ChannelPointMap, user_id: String) -> u64 {
+    let user_points = channel_points.entry(user_id).or_insert(0);
+
+    return *user_points;
+}
+
+fn edit_points(channel_points: &mut ChannelPointMap, user_id: String, points: i32) -> u64 {
+    if points > 0 {
+        return add_points(channel_points, user_id, points as u64);
+    } else if points < 0 {
+        return remove_points(channel_points, user_id, points);
+    }
+
+    return get_points(channel_points, user_id);
+}
+
 fn main() {
     let mut points = load_points().unwrap();
 
@@ -98,25 +135,20 @@ fn main() {
                             .entry(c.channel_name)
                             .or_insert(ChannelPointMap::new());
 
-                        let user_points = channel_points.entry(c.user_id).or_insert(0);
+                        let new_points = edit_points(channel_points, c.user_id, c.points);
 
-                        if c.points > 0 {
-                            *user_points += c.points as u64;
-                        } else if c.points < 0 {
-                            let points_u64: u64 = c.points.abs() as u64;
-                            if points_u64 > *user_points {
-                                *user_points = 0;
-                            } else {
-                                *user_points -= points_u64;
-                            }
-                        } else {
-                            // Trying to give/remove 0 points, do nothing
+                        c.response_sender.send(new_points).unwrap();
+                    }
+                    BulkEdit(c) => {
+                        let channel_points = points
+                            .entry(c.channel_name)
+                            .or_insert(ChannelPointMap::new());
+
+                        for user_id in c.user_ids {
+                            edit_points(channel_points, user_id, c.points);
                         }
-
-                        c.response_sender.send(*user_points).unwrap();
                     }
                     SavePoints => {
-                        println!("save points");
                         save_points(&mut points).unwrap();
                     }
                     Quit => break,
