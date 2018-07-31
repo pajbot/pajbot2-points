@@ -1,20 +1,46 @@
-use std::collections::HashMap;
 use std::io::Write;
 use std::net::TcpStream;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::mpsc::channel;
+use std::sync::mpsc::Sender;
 
 use common::*;
 use parse::*;
 use read::*;
 use utils::*;
 
+pub struct GetPoints {
+    pub channel_name: String,
+    pub user_id: String,
+    pub response_sender: Sender<u64>,
+}
+
+pub struct EditPoints {
+    pub channel_name: String,
+    pub user_id: String,
+
+    // How many points to edit (positive for add, negative for remove)
+    pub points: i32,
+
+    // New points total for user
+    pub response_sender: Sender<u64>,
+}
+
+pub enum Command {
+    GetPoints(GetPoints),
+    EditPoints(EditPoints),
+    SavePoints,
+    Quit,
+}
+
 pub struct Client {
     stream: TcpStream,
-    point_channel_map: ChannelPointMap,
+    // point_channel_map: ChannelPointMap,
+    channel_name: String,
+    request_sender: Sender<(Command)>,
 }
 
 impl Client {
-    pub fn new(mut stream: TcpStream, points: Arc<Mutex<PointMap>>) -> Result<Client, MyError> {
+    pub fn new(mut stream: TcpStream, sender: Sender<(Command)>) -> Result<Client, MyError> {
         let (command, body_size) = read_header(&mut stream)?;
         if command != COMMAND_CONNECT {
             return Err(MyError::WrongCommand(WrongCommand::new(
@@ -26,13 +52,10 @@ impl Client {
         let body_buf = read_body(&mut stream, body_size as usize)?;
         let channel_name = String::from_utf8(body_buf).map_err(|e| MyError::ParseError(e))?;
 
-        let mut data = points.lock().unwrap();
-        let channel_point_map = data.entry(channel_name)
-            .or_insert(Arc::new(RwLock::new(HashMap::new())));
-
         return Ok(Client {
             stream: stream,
-            point_channel_map: channel_point_map.clone(),
+            channel_name: channel_name,
+            request_sender: sender,
         });
     }
 
@@ -72,7 +95,7 @@ impl Client {
             _ => println!("Unknown command {}", command),
         }
 
-        Ok(())
+        return Ok(());
     }
 
     fn respond(&mut self, response: Vec<u8>) -> Result<(), MyError> {
@@ -80,65 +103,47 @@ impl Client {
             .write(&response)
             .map_err(|e| MyError::IoError(e))?;
 
-        Ok(())
+        return Ok(());
     }
 
     fn handle_get_points(&mut self, buffer: Vec<u8>) -> Result<Vec<u8>, MyError> {
         let user_id = parse_user_id(buffer.to_vec())?;
-        match self.get_points(&user_id) {
-            Some(points) => Ok(u64_to_buf(points).to_vec()),
-            None => Ok(u64_to_buf(0).to_vec()),
-        }
+
+        let (sender, receiver) = channel();
+
+        self.request_sender
+            .send(Command::GetPoints(GetPoints {
+                channel_name: self.channel_name.clone(),
+                user_id: user_id,
+                response_sender: sender,
+            }))
+            .unwrap();
+
+        let points: u64 = receiver.recv().unwrap();
+
+        return Ok(u64_to_buf(points).to_vec());
     }
 
     fn handle_edit_points(&mut self, buffer: Vec<u8>) -> Result<Vec<u8>, MyError> {
-        let points_buffer = &buffer[0..4];
+        // Read points from 4 first bytes
+        let points = buf_to_i32_unsafe(&buffer[0..4]);
 
-        let points = buf_to_i32_unsafe(points_buffer);
-
+        // Read user ID into a string from remaining bytes
         let user_id = parse_user_id(buffer[4..].to_vec())?;
 
-        println!(
-            "Add {} points for user with id {} in channel XXX",
-            points, user_id
-        );
+        let (sender, receiver) = channel();
 
-        let mut data = self.point_channel_map.write().unwrap();
-        let user_points = data.entry(user_id).or_insert(0);
+        self.request_sender
+            .send(Command::EditPoints(EditPoints {
+                channel_name: self.channel_name.clone(),
+                user_id: user_id,
+                points: points,
+                response_sender: sender,
+            }))
+            .unwrap();
 
-        match points {
-            points if points > 0 => {
-                *user_points += points as u64;
-            }
-            points if points < 0 => {
-                let points_u64: u64 = points.abs() as u64;
-                if points_u64 > *user_points {
-                    *user_points = 0;
-                } else {
-                    *user_points -= points_u64;
-                }
-            }
-            _ => {
-                // Trying to give/remove 0 points, do nothing
-            }
-        }
+        let points: u64 = receiver.recv().unwrap();
 
-        let response = u64_to_buf(*user_points);
-
-        Ok(response.to_vec())
-    }
-
-    fn get_points(&mut self, user_id: &String) -> Option<u64> {
-        let data = self.point_channel_map.read().unwrap();
-        let ret = data.get(user_id);
-
-        match ret {
-            Some(x) => {
-                return Some(*x);
-            }
-            None => {
-                return None;
-            }
-        }
+        return Ok(u64_to_buf(points).to_vec());
     }
 }
