@@ -20,6 +20,7 @@ pub enum MyError {
     IoError(io::Error),
     ParseError(string::FromUtf8Error),
     WrongCommand(WrongCommand),
+    BufferError,
 }
 
 impl fmt::Display for MyError {
@@ -32,6 +33,7 @@ impl fmt::Display for MyError {
                 "wrong command. got {:x}, expected {:x}",
                 e.received_command, e.expected_command
             ),
+            MyError::BufferError => write!(f, "buffer error"),
         }
     }
 }

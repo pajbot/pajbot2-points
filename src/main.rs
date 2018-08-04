@@ -18,6 +18,7 @@ mod utils;
 mod client;
 use self::client::Client;
 use self::client::Command;
+use self::client::Operation;
 
 use bincode::{deserialize, serialize};
 
@@ -74,14 +75,13 @@ fn add_points(channel_points: &mut ChannelPointMap, user_id: String, points: u64
     return *user_points;
 }
 
-fn remove_points(channel_points: &mut ChannelPointMap, user_id: String, points: i32) -> u64 {
+fn remove_points(channel_points: &mut ChannelPointMap, user_id: String, points: u64) -> u64 {
     let user_points = channel_points.entry(user_id).or_insert(0);
 
-    let points_u64: u64 = points.abs() as u64;
-    if points_u64 > *user_points {
+    if points > *user_points {
         *user_points = 0;
     } else {
-        *user_points -= points_u64;
+        *user_points -= points;
     }
 
     return *user_points;
@@ -97,7 +97,7 @@ fn edit_points(channel_points: &mut ChannelPointMap, user_id: String, points: i3
     if points > 0 {
         return add_points(channel_points, user_id, points as u64);
     } else if points < 0 {
-        return remove_points(channel_points, user_id, points);
+        return remove_points(channel_points, user_id, points.abs() as u64);
     }
 
     return get_points(channel_points, user_id);
@@ -138,15 +138,6 @@ fn main() {
                             }
                         }
                     }
-                    EditPoints(c) => {
-                        let channel_points = points
-                            .entry(c.channel_name)
-                            .or_insert(ChannelPointMap::new());
-
-                        let new_points = edit_points(channel_points, c.user_id, c.points);
-
-                        c.response_sender.send(new_points).unwrap();
-                    }
                     BulkEdit(c) => {
                         let channel_points = points
                             .entry(c.channel_name)
@@ -154,6 +145,29 @@ fn main() {
 
                         for user_id in c.user_ids {
                             edit_points(channel_points, user_id, c.points);
+                        }
+                    }
+                    Edit(c) => {
+                        let channel_points = points
+                            .entry(c.channel_name)
+                            .or_insert(ChannelPointMap::new());
+
+                        match c.operation {
+                            Operation::Add => {
+                                let new_value = add_points(channel_points, c.user_id, c.value);
+                                c.response_sender.send((true, new_value)).unwrap();
+                            }
+                            Operation::Remove => {
+                                let user_value = get_points(channel_points, c.user_id.clone());
+
+                                if user_value < c.value {
+                                    c.response_sender.send((false, user_value)).unwrap();
+                                    continue;
+                                }
+
+                                let new_value = remove_points(channel_points, c.user_id, c.value);
+                                c.response_sender.send((true, new_value)).unwrap();
+                            }
                         }
                     }
                     SavePoints => {

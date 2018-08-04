@@ -14,17 +14,6 @@ pub struct GetPoints {
     pub response_sender: Sender<u64>,
 }
 
-pub struct EditPoints {
-    pub channel_name: String,
-    pub user_id: String,
-
-    // How many points to edit (positive for add, negative for remove)
-    pub points: i32,
-
-    // New points total for user
-    pub response_sender: Sender<u64>,
-}
-
 pub struct BulkEdit {
     pub channel_name: String,
 
@@ -34,12 +23,29 @@ pub struct BulkEdit {
     pub points: i32,
 }
 
+pub enum Operation {
+    Add,
+    Remove,
+}
+
+pub struct Edit {
+    pub channel_name: String,
+    pub user_id: String,
+
+    pub operation: Operation,
+
+    pub value: u64,
+
+    // New value total for user
+    pub response_sender: Sender<(bool, u64)>,
+}
+
 pub enum Command {
     GetPoints(GetPoints),
-    EditPoints(EditPoints),
     SavePoints,
     Quit,
     BulkEdit(BulkEdit),
+    Edit(Edit),
 }
 
 pub struct Client {
@@ -98,12 +104,16 @@ impl Client {
                 let response = self.handle_get_points(body.to_vec())?;
                 self.respond(response)?;
             }
-            COMMAND_EDIT => {
-                let response = self.handle_edit_points(body.to_vec())?;
-                self.respond(response)?;
-            }
             COMMAND_BULK_EDIT => {
                 self.handle_bulk_edit(body.to_vec())?;
+            }
+            COMMAND_ADD => {
+                let response = self.handle_add(body.to_vec())?;
+                self.respond(response)?;
+            }
+            COMMAND_REMOVE => {
+                let response = self.handle_remove(body.to_vec())?;
+                self.respond(response)?;
             }
             _ => println!("Unknown command {}", command),
         }
@@ -137,29 +147,6 @@ impl Client {
         return Ok(u64_to_buf(points).to_vec());
     }
 
-    fn handle_edit_points(&mut self, buffer: Vec<u8>) -> Result<Vec<u8>, MyError> {
-        // Read points from 4 first bytes
-        let points = buf_to_i32_unsafe(&buffer[0..4]);
-
-        // Read user ID into a string from remaining bytes
-        let user_id = parse_user_id(buffer[4..].to_vec())?;
-
-        let (sender, receiver) = channel();
-
-        self.request_sender
-            .send(Command::EditPoints(EditPoints {
-                channel_name: self.channel_name.clone(),
-                user_id: user_id,
-                points: points,
-                response_sender: sender,
-            }))
-            .unwrap();
-
-        let points: u64 = receiver.recv().unwrap();
-
-        return Ok(u64_to_buf(points).to_vec());
-    }
-
     fn handle_bulk_edit(&mut self, buffer: Vec<u8>) -> Result<(), MyError> {
         // Read points from 4 first bytes
         let points = buf_to_i32_unsafe(&buffer[0..4]);
@@ -178,5 +165,69 @@ impl Client {
             .unwrap();
 
         return Ok(());
+    }
+
+    fn handle_add(&mut self, buffer: Vec<u8>) -> Result<Vec<u8>, MyError> {
+        // Read points from 8 first bytes
+        let points = buf_to_u64(&buffer[0..8])?;
+
+        // Read user ID into a string from remaining bytes
+        let user_id = parse_user_id(buffer[8..].to_vec())?;
+
+        let (sender, receiver) = channel();
+
+        self.request_sender
+            .send(Command::Edit(Edit {
+                channel_name: self.channel_name.clone(),
+                user_id: user_id,
+                operation: Operation::Add,
+                value: points,
+                response_sender: sender,
+            }))
+            .unwrap();
+
+        let mut response = Vec::new();
+
+        let (result_bool, user_points) = receiver.recv().unwrap();
+        let result = if result_bool { RESULT_OK } else { RESULT_ERR };
+
+        let user_points_buf = u64_to_buf(user_points);
+
+        response.push(result);
+        response.append(&mut user_points_buf.to_vec());
+
+        return Ok(response);
+    }
+
+    fn handle_remove(&mut self, buffer: Vec<u8>) -> Result<Vec<u8>, MyError> {
+        // Read points from 8 first bytes
+        let points = buf_to_u64(&buffer[0..8])?;
+
+        // Read user ID into a string from remaining bytes
+        let user_id = parse_user_id(buffer[8..].to_vec())?;
+
+        let (sender, receiver) = channel();
+
+        self.request_sender
+            .send(Command::Edit(Edit {
+                channel_name: self.channel_name.clone(),
+                user_id: user_id,
+                operation: Operation::Remove,
+                value: points,
+                response_sender: sender,
+            }))
+            .unwrap();
+
+        let mut response = Vec::new();
+
+        let (result_bool, user_points) = receiver.recv().unwrap();
+        let result = if result_bool { RESULT_OK } else { RESULT_ERR };
+
+        let user_points_buf = u64_to_buf(user_points);
+
+        response.push(result);
+        response.append(&mut user_points_buf.to_vec());
+
+        return Ok(response);
     }
 }
