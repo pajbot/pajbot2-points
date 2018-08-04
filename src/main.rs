@@ -34,17 +34,25 @@ static DB_PATH: &'static str = "db.txt";
 static HOST: &'static str = "127.0.0.1:54321";
 
 fn load_points() -> io::Result<PointMap> {
-    let mut file = File::open(DB_PATH)?;
-
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf)?;
-
-    match deserialize(&buf) {
-        Err(_) => {
+    match File::open(DB_PATH) {
+        Err(ref e) if e.kind() == io::ErrorKind::NotFound => {
             return Ok(PointMap::new());
         }
-        Ok(m) => {
-            return Ok(m);
+        Err(e) => {
+            return Err(e);
+        }
+        Ok(mut file) => {
+            let mut buf = Vec::new();
+            file.read_to_end(&mut buf)?;
+
+            match deserialize(&buf) {
+                Err(_) => {
+                    return Ok(PointMap::new());
+                }
+                Ok(m) => {
+                    return Ok(m);
+                }
+            }
         }
     }
 }
