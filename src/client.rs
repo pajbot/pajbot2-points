@@ -157,8 +157,6 @@ impl Client {
         // Read user ID into a string from remaining bytes
         let user_ids = parse_user_id_bulk(buffer[4..].to_vec())?;
 
-        println!("bulk edit points xd {:?}", user_ids);
-
         self.request_sender
             .send(Command::BulkEdit(BulkEdit {
                 channel_name: self.channel_name.clone(),
