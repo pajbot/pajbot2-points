@@ -55,11 +55,11 @@ pub struct Client {
     stream: TcpStream,
     // point_channel_map: ChannelPointMap,
     channel_name: String,
-    request_sender: Sender<(Command)>,
+    request_sender: Sender<Command>,
 }
 
 impl Client {
-    pub fn new(mut stream: TcpStream, sender: Sender<(Command)>) -> Result<Client, MyError> {
+    pub fn new(mut stream: TcpStream, sender: Sender<Command>) -> Result<Client, MyError> {
         let (command, body_size) = read_header(&mut stream)?;
         if command != COMMAND_CONNECT {
             return Err(MyError::WrongCommand(WrongCommand::new(
@@ -102,23 +102,17 @@ impl Client {
         let (command, body_size) = read_header(&mut self.stream)?;
         let body = read_body(&mut self.stream, body_size as usize)?;
 
-        match command {
-            COMMAND_GET => {
-                let response = self.handle_get_points(body.to_vec())?;
-                self.respond(response)?;
+        if let Some(response) = match command {
+            COMMAND_GET => self.handle_get_points(body.to_vec())?,
+            COMMAND_BULK_EDIT => self.handle_bulk_edit(body.to_vec())?,
+            COMMAND_ADD => self.handle_add(body.to_vec())?,
+            COMMAND_REMOVE => self.handle_remove(body.to_vec())?,
+            _ => {
+                println!("Unknown command {}", command);
+                None
             }
-            COMMAND_BULK_EDIT => {
-                self.handle_bulk_edit(body.to_vec())?;
-            }
-            COMMAND_ADD => {
-                let response = self.handle_add(body.to_vec())?;
-                self.respond(response)?;
-            }
-            COMMAND_REMOVE => {
-                let response = self.handle_remove(body.to_vec())?;
-                self.respond(response)?;
-            }
-            _ => println!("Unknown command {}", command),
+        } {
+            self.respond(response)?;
         }
 
         return Ok(());
@@ -132,7 +126,7 @@ impl Client {
         return Ok(());
     }
 
-    fn handle_get_points(&mut self, buffer: Vec<u8>) -> Result<Vec<u8>, MyError> {
+    fn handle_get_points(&mut self, buffer: Vec<u8>) -> Result<Option<Vec<u8>>, MyError> {
         let user_id = parse_user_id(buffer.to_vec())?;
 
         let (sender, receiver) = channel();
@@ -147,10 +141,10 @@ impl Client {
 
         let points: u64 = receiver.recv().unwrap();
 
-        return Ok(u64_to_buf(points).to_vec());
+        return Ok(Some(u64_to_buf(points).to_vec()));
     }
 
-    fn handle_bulk_edit(&mut self, buffer: Vec<u8>) -> Result<(), MyError> {
+    fn handle_bulk_edit(&mut self, buffer: Vec<u8>) -> Result<Option<Vec<u8>>, MyError> {
         // Read points from 4 first bytes
         let points = buf_to_i32_unsafe(&buffer[0..4]);
 
@@ -165,10 +159,10 @@ impl Client {
             }))
             .unwrap();
 
-        return Ok(());
+        return Ok(None);
     }
 
-    fn handle_add(&mut self, buffer: Vec<u8>) -> Result<Vec<u8>, MyError> {
+    fn handle_add(&mut self, buffer: Vec<u8>) -> Result<Option<Vec<u8>>, MyError> {
         // Read points from 8 first bytes
         let points = buf_to_u64(&buffer[0..8])?;
 
@@ -198,10 +192,10 @@ impl Client {
         response.push(result);
         response.append(&mut user_points_buf.to_vec());
 
-        return Ok(response);
+        return Ok(Some(response));
     }
 
-    fn handle_remove(&mut self, buffer: Vec<u8>) -> Result<Vec<u8>, MyError> {
+    fn handle_remove(&mut self, buffer: Vec<u8>) -> Result<Option<Vec<u8>>, MyError> {
         let force = if buffer[0] == 0x01 { true } else { false };
         // Read points from 8 first bytes
         let points = buf_to_u64(&buffer[1..9])?;
@@ -232,6 +226,6 @@ impl Client {
         response.push(result);
         response.append(&mut user_points_buf.to_vec());
 
-        return Ok(response);
+        return Ok(Some(response));
     }
 }
