@@ -158,11 +158,13 @@ fn main() {
                                 c.response_sender.send((true, new_value)).unwrap();
                             }
                             Operation::Remove => {
-                                let user_value = get_points(channel_points, c.user_id.clone());
+                                if !c.force {
+                                    let user_value = get_points(channel_points, c.user_id.clone());
 
-                                if user_value < c.value {
-                                    c.response_sender.send((false, user_value)).unwrap();
-                                    continue;
+                                    if user_value < c.value {
+                                        c.response_sender.send((false, user_value)).unwrap();
+                                        continue;
+                                    }
                                 }
 
                                 let new_value = remove_points(channel_points, c.user_id, c.value);

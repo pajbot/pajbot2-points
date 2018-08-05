@@ -36,6 +36,9 @@ pub struct Edit {
 
     pub value: u64,
 
+    // Force set
+    pub force: bool,
+
     // New value total for user
     pub response_sender: Sender<(bool, u64)>,
 }
@@ -182,6 +185,7 @@ impl Client {
                 user_id: user_id,
                 operation: Operation::Add,
                 value: points,
+                force: false,
                 response_sender: sender,
             }))
             .unwrap();
@@ -200,11 +204,12 @@ impl Client {
     }
 
     fn handle_remove(&mut self, buffer: Vec<u8>) -> Result<Vec<u8>, MyError> {
+        let force = if buffer[0] == 0x01 { true } else { false };
         // Read points from 8 first bytes
-        let points = buf_to_u64(&buffer[0..8])?;
+        let points = buf_to_u64(&buffer[1..9])?;
 
         // Read user ID into a string from remaining bytes
-        let user_id = parse_user_id(buffer[8..].to_vec())?;
+        let user_id = parse_user_id(buffer[9..].to_vec())?;
 
         let (sender, receiver) = channel();
 
@@ -214,6 +219,7 @@ impl Client {
                 user_id: user_id,
                 operation: Operation::Remove,
                 value: points,
+                force: force,
                 response_sender: sender,
             }))
             .unwrap();
