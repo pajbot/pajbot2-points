@@ -46,7 +46,7 @@ pub struct Edit {
 pub enum Command {
     GetPoints(GetPoints),
     SavePoints,
-    Quit,
+    Quit(Sender<()>),
     BulkEdit(BulkEdit),
     Edit(Edit),
 }
