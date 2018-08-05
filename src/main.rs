@@ -1,8 +1,6 @@
 use std::net::TcpListener;
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
-use std::sync::Arc;
 use std::{io, process, thread, time};
 
 use std::fs::{File, OpenOptions};
@@ -111,9 +109,6 @@ fn main() {
     let (sender, receiver) = channel();
 
     let ctrl_sender_copy = sender.clone();
-    let running = Arc::new(AtomicBool::new(true));
-
-    let r = running.clone();
 
     // Initialize points map handler
     thread::spawn(move || {
@@ -175,20 +170,22 @@ fn main() {
                     SavePoints => {
                         save_points(&mut points).unwrap();
                     }
-                    Quit => break,
+                    Quit(sender) => {
+                        save_points(&mut points).unwrap();
+                        sender.send(()).unwrap();
+                        break;
+                    }
                 },
             }
         }
-
-        save_points(&mut points).unwrap();
-        running.store(false, Ordering::SeqCst);
     });
 
     // Initialize SIGINT and SIGTERM handler
     ctrlc::set_handler(move || {
-        ctrl_sender_copy.send(Command::Quit).unwrap();
+        let (sender, receiver) = channel();
+        ctrl_sender_copy.send(Command::Quit(sender)).unwrap();
 
-        while r.load(Ordering::SeqCst) {}
+        receiver.recv().unwrap();
 
         process::exit(0x0);
     }).expect("Error setting Ctrl-C handler");
