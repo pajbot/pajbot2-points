@@ -1,220 +1,128 @@
-use std::net::TcpListener;
-
-use std::sync::mpsc::channel;
-use std::{io, process, thread, time};
-
-use std::fs::{File, OpenOptions};
-use std::io::prelude::*;
-
-mod common;
-use self::common::*;
-
-mod parse;
-mod read;
-mod utils;
-
-mod client;
-use self::client::Client;
-use self::client::Command;
-use self::client::Operation;
-
-use bincode::{deserialize, serialize};
-
 extern crate bincode;
-
-#[allow(unused_imports)]
-#[macro_use]
-extern crate serde_derive;
-
+extern crate byteorder;
+extern crate bytes;
 extern crate ctrlc;
+extern crate env_logger;
+#[macro_use]
+extern crate log;
+extern crate serde;
+extern crate tokio;
+extern crate tokio_codec;
 
-static SAVE_INTERVAL: time::Duration = time::Duration::from_millis(10 * 1000 * 60);
-static DB_PATH: &'static str = "db.txt";
-static HOST: &'static str = "127.0.0.1:54321";
+use {
+    std::{
+        fs::{self, File},
+        io::{BufReader, Error, BufWriter, ErrorKind},
+        sync::{
+            mpsc::{self, RecvTimeoutError},
+        },
+        time::{Duration},
+        thread::{self}
+    },
+    tokio::{
+        prelude::{*},
+        runtime::{Runtime}
+    },
+    db::{Db},
+    server::{Server}
+};
 
-fn load_points() -> io::Result<PointMap> {
-    match File::open(DB_PATH) {
-        Err(ref e) if e.kind() == io::ErrorKind::NotFound => {
-            return Ok(PointMap::new());
-        }
-        Err(e) => {
-            return Err(e);
-        }
-        Ok(mut file) => {
-            let mut buf = Vec::new();
-            file.read_to_end(&mut buf)?;
+mod atomic;
+mod client;
+mod codec;
+mod db;
+mod server;
 
-            match deserialize(&buf) {
-                Err(_) => {
-                    return Ok(PointMap::new());
-                }
-                Ok(m) => {
-                    return Ok(m);
-                }
-            }
-        }
-    }
-}
-
-fn save_points(points: &mut PointMap) -> io::Result<()> {
-    let mut file = OpenOptions::new().write(true).create(true).open(DB_PATH)?;
-
-    let mut buf = serialize(&points).unwrap();
-    file.write(&mut buf)?;
-
-    return Ok(());
-}
-
-fn add_points(channel_points: &mut ChannelPointMap, user_id: String, points: u64) -> u64 {
-    let user_points = channel_points.entry(user_id).or_insert(0);
-
-    *user_points += points;
-
-    return *user_points;
-}
-
-fn remove_points(channel_points: &mut ChannelPointMap, user_id: String, points: u64) -> u64 {
-    let user_points = channel_points.entry(user_id).or_insert(0);
-
-    if points > *user_points {
-        *user_points = 0;
-    } else {
-        *user_points -= points;
-    }
-
-    return *user_points;
-}
-
-fn get_points(channel_points: &mut ChannelPointMap, user_id: String) -> u64 {
-    let user_points = channel_points.entry(user_id).or_insert(0);
-
-    return *user_points;
-}
-
-fn edit_points(channel_points: &mut ChannelPointMap, user_id: String, points: i32) -> u64 {
-    if points > 0 {
-        return add_points(channel_points, user_id, points as u64);
-    } else if points < 0 {
-        return remove_points(channel_points, user_id, points.abs() as u64);
-    }
-
-    return get_points(channel_points, user_id);
-}
+const DB_SAVE_INTERVAL: Duration = Duration::from_millis(10 * 1000 * 60);
+const DB_SAVE_PATH: &str = "db.txt";
+const DB_TMP_SAVE_PATH: &str = "points.db.tmp";
+const LISTEN_ADDRESS: &str = "127.0.0.1:54321";
 
 fn main() {
-    let mut points = load_points().unwrap();
+    env_logger::Builder::from_default_env()
+        .default_format_timestamp_nanos(true)
+        .try_init()
+        .expect("failed to initialize env_logger");
+        
+    let db = load_db().expect("failed to load db");
 
-    let listener = TcpListener::bind(HOST).unwrap();
-
-    let (sender, receiver) = channel();
-
-    let ctrl_sender_copy = sender.clone();
-
-    // Initialize points map handler
-    thread::spawn(move || {
-        loop {
-            use Command::*;
-
-            match receiver.recv() {
-                Err(_) => continue,
-                Ok(cmd) => match cmd {
-                    GetPoints(c) => {
-                        let channel_points = points
-                            .entry(c.channel_name)
-                            .or_insert(ChannelPointMap::new());
-
-                        match channel_points.get(&c.user_id) {
-                            Some(x) => {
-                                c.response_sender.send(*x).unwrap();
-                            }
-                            None => {
-                                // User did not exist in the points database
-                                c.response_sender.send(0).unwrap();
-                            }
-                        }
-                    }
-                    BulkEdit(c) => {
-                        let channel_points = points
-                            .entry(c.channel_name)
-                            .or_insert(ChannelPointMap::new());
-
-                        for user_id in c.user_ids {
-                            edit_points(channel_points, user_id, c.points);
-                        }
-                    }
-                    Edit(c) => {
-                        let channel_points = points
-                            .entry(c.channel_name)
-                            .or_insert(ChannelPointMap::new());
-
-                        match c.operation {
-                            Operation::Add => {
-                                let new_value = add_points(channel_points, c.user_id, c.value);
-                                c.response_sender.send((true, new_value)).unwrap();
-                            }
-                            Operation::Remove => {
-                                if !c.force {
-                                    let user_value = get_points(channel_points, c.user_id.clone());
-
-                                    if user_value < c.value {
-                                        c.response_sender.send((false, user_value)).unwrap();
-                                        continue;
-                                    }
-                                }
-
-                                let new_value = remove_points(channel_points, c.user_id, c.value);
-                                c.response_sender.send((true, new_value)).unwrap();
-                            }
-                        }
-                    }
-                    SavePoints => {
-                        save_points(&mut points).unwrap();
-                    }
-                    Quit(sender) => {
-                        save_points(&mut points).unwrap();
-                        sender.send(()).unwrap();
-                        break;
-                    }
-                },
-            }
-        }
-    });
-
-    // Initialize SIGINT and SIGTERM handler
+    let (sender, receiver) = mpsc::channel();
     ctrlc::set_handler(move || {
-        let (sender, receiver) = channel();
-        ctrl_sender_copy.send(Command::Quit(sender)).unwrap();
+        info!("termination signal received");
+        sender.send(()).unwrap();
+    }).expect("failed to set termination signal handler");
 
-        receiver.recv().unwrap();
+    let mut runtime = Runtime::new().expect("failed to create tokio runtime");
+    runtime.spawn(Server::new(&LISTEN_ADDRESS.parse().expect("failed to parse socket address"), db.clone()).expect("failed to create server"));
 
-        process::exit(0x0);
-    }).expect("Error setting Ctrl-C handler");
+    loop {
+        let shutdown = match receiver.recv_timeout(DB_SAVE_INTERVAL) {
+            Ok(()) => { true }
+            Err(RecvTimeoutError::Disconnected) => {
+                error!("termination signal sender disconnected");
+                true
+            }
+            Err(RecvTimeoutError::Timeout) => { false }
+        };
 
-    // Initialize occasional sender thread
-    let sender_copy = sender.clone();
-    thread::spawn(move || loop {
-        thread::sleep(SAVE_INTERVAL);
-        sender_copy.send(Command::SavePoints).unwrap();
-    });
+        if shutdown {
+            info!("shutting down...");
+                
+            match runtime.shutdown_now().wait() {
+                Ok(()) => { info!("runtime shut down"); }
+                Err(()) => { error!("runtime shutdown error"); }
+            }
 
-    // Start listening for connections
-    for stream_result in listener.incoming() {
-        match stream_result {
-            Err(e) => println!("Error accepting connection: {}", e),
-            Ok(mut stream) => {
-                let sender_copy = sender.clone();
-                thread::spawn(move || {
-                    let result = Client::new(stream, sender_copy);
-                    match result {
-                        Err(e) => {
-                            println!("Error connecting to client: {}", e);
-                        }
-                        Ok(mut client) => {
-                            client.run();
-                        }
-                    }
-                });
+            if !db.is_last() {
+                warn!("there are still handles to the db");
+            }
+
+            save_db_loop(&db);
+            break;
+        }
+
+        save_db_loop(&db);
+    }
+}
+
+fn load_db() -> Result<Db, Error> {
+    trace!("loading db...");
+    
+    match File::open(DB_SAVE_PATH) {
+        Ok(file) => { bincode::deserialize_from(BufReader::new(file)).map_err(|e| Error::new(ErrorKind::Other, e)) }
+        Err(ref e) if e.kind() == ErrorKind::NotFound => { Ok(Default::default()) }
+        Err(e) => { Err(e) }
+    }
+}
+
+fn save_db_loop(db: &Db) {
+    for attempt in 0.. {
+        log!(
+            if attempt == 0 { log::Level::Trace } else { log::Level::Debug },
+            "trying to save db for {} time...", attempt + 1
+        );
+
+        match save_db_atomic(&db) {
+            Ok(()) => {
+                log!(
+                    if attempt == 0 { log::Level::Debug } else { log::Level::Info },
+                    "saved db after {} attempts", attempt + 1
+                );
+
+                break;
+            }
+            Err(e) => {
+                error!("{} attempt at saving db failed: '{}'", attempt + 1, e);
             }
         }
+
+        thread::sleep(Duration::from_secs(5));
     }
+}
+
+fn save_db_atomic(db: &Db) -> Result<(), Error> {
+    let mut writer = BufWriter::new(File::create(DB_TMP_SAVE_PATH)?);
+    bincode::serialize_into(&mut writer, &db).map_err(|e| Error::new(ErrorKind::Other, e))?;
+    writer.into_inner()?.sync_all()?;
+    fs::rename(DB_TMP_SAVE_PATH, DB_SAVE_PATH)
 }
