@@ -1,231 +1,179 @@
-use std::io::Write;
-use std::net::TcpStream;
-use std::sync::mpsc::channel;
-use std::sync::mpsc::Sender;
-
-use common::*;
-use parse::*;
-use read::*;
-use utils::*;
-
-pub struct GetPoints {
-    pub channel_name: String,
-    pub user_id: String,
-    pub response_sender: Sender<u64>,
-}
-
-pub struct BulkEdit {
-    pub channel_name: String,
-
-    pub user_ids: Vec<String>,
-
-    // How many points to edit (positive for add, negative for remove)
-    pub points: i32,
-}
-
-pub enum Operation {
-    Add,
-    Remove,
-}
-
-pub struct Edit {
-    pub channel_name: String,
-    pub user_id: String,
-
-    pub operation: Operation,
-
-    pub value: u64,
-
-    // Force set
-    pub force: bool,
-
-    // New value total for user
-    pub response_sender: Sender<(bool, u64)>,
-}
-
-pub enum Command {
-    GetPoints(GetPoints),
-    SavePoints,
-    Quit(Sender<()>),
-    BulkEdit(BulkEdit),
-    Edit(Edit),
-}
+use {
+    std::{
+        fmt::{self, Formatter, Display},
+        io::{Error, ErrorKind},
+        net::{SocketAddr}
+    },
+    tokio::{
+        net::{TcpStream},
+        prelude::{*}
+    },
+    tokio_codec::{Framed, Decoder},
+    codec::{Codec, Request, Response},
+    db::{self}
+};
 
 pub struct Client {
-    stream: TcpStream,
-    // point_channel_map: ChannelPointMap,
-    channel_name: String,
-    request_sender: Sender<Command>,
+    io: Framed<TcpStream, Codec>,
+    id: Id,
+    buffer: Option<Response>,
+    db: Db
+}
+
+pub enum Db {
+    Connecting(db::Db),
+    Connected(db::ChannelDb)
+}
+
+enum Id {
+    Connecting(SocketAddr),
+    Connected { addr: SocketAddr, channel: String }
 }
 
 impl Client {
-    pub fn new(mut stream: TcpStream, sender: Sender<Command>) -> Result<Client, MyError> {
-        let (command, body_size) = read_header(&mut stream)?;
-        if command != COMMAND_CONNECT {
-            return Err(MyError::WrongCommand(WrongCommand::new(
-                command,
-                COMMAND_CONNECT,
-            )));
+    pub fn new<I: Into<Db>>(stream: TcpStream, addr: SocketAddr, db: I) -> Self {
+        Client {
+            io: Codec::default().framed(stream),
+            id: Id::Connecting(addr),
+            buffer: None,
+            db: db.into()
         }
-
-        let body_buf = read_body(&mut stream, body_size as usize)?;
-        let channel_name = String::from_utf8(body_buf).map_err(|e| MyError::ParseError(e))?;
-
-        return Ok(Client {
-            stream: stream,
-            channel_name: channel_name,
-            request_sender: sender,
-        });
     }
 
-    pub fn run(&mut self) {
-        println!("Running client {:?}", self.stream);
-        loop {
-            match self.handle_command() {
-                Err(e) => {
-                    // Something that went wrong, went wrong.
-                    // If we can recover from the error, or tell the client that something went
-                    // wrong, we should probably do that.
-                    // For now, disconnecting and letting the client reconnect is probably the best
-                    // thing
-                    println!("An error occured in handle_command: {}", e);
-                    break;
+    fn handle_request(&mut self, request: Request) -> Result<Option<Response>, Error> {
+        trace!("{}: handling request: '{:?}'", self.id, request);
+
+        if let Request::Connect { channel } = request {
+            let (db, id) = match (&self.id, &self.db) {
+                (Id::Connecting(addr), Db::Connecting(db)) => {
+                    (db.channel_db(&channel).into(), Id::Connected { addr: addr.clone(), channel })
                 }
-                Ok(_) => {}
-            }
+                (Id::Connected { .. }, Db::Connected(_)) => { return Err(Error::new(ErrorKind::InvalidData, "already connected")); }
+                _ => { unreachable!("{}: Id and Db are out of sync", self.id); }
+            };
+
+            self.db = db;
+            self.id = id;
+            
+            debug!("{}: connected", self.id);
+            return Ok(None);
         }
-    }
 
-    // Blocks and reads + handles the next incoming command
-    // TODO: We might want a way to stop at the "waiting for header size" stage in case of quitting
-    fn handle_command(&mut self) -> Result<(), MyError> {
-        let (command, body_size) = read_header(&mut self.stream)?;
-        let body = read_body(&mut self.stream, body_size as usize)?;
+        let db = if let Db::Connected(db) = &self.db {
+            db
+        } else {
+            return Err(Error::new(ErrorKind::InvalidData, "not connected"));
+        };
 
-        if let Some(response) = match command {
-            COMMAND_GET => self.handle_get_points(body.to_vec())?,
-            COMMAND_BULK_EDIT => self.handle_bulk_edit(body.to_vec())?,
-            COMMAND_ADD => self.handle_add(body.to_vec())?,
-            COMMAND_REMOVE => self.handle_remove(body.to_vec())?,
-            _ => {
-                println!("Unknown command {}", command);
+        Ok(match request {
+            Request::Connect { .. } => { unreachable!("{}: connect command should already be handled", self.id); }
+            Request::Get { user } => { Some(db.get(&user).into()) }
+            Request::BulkEdit { users, points } => {
+                if points == 0 {
+                    info!("{}: BulkEdit with 0 points does nothing", self.id);
+                }
+
+                if points < 0 {
+                    users.iter().for_each(|user| { db.update_infallible(user, -(points as i64) as u64, u64::saturating_sub); });
+                } else if points > 0 {
+                    users.iter().for_each(|user| { db.update_infallible(user, points as u64, u64::saturating_add); });
+                }
+
                 None
             }
-        } {
-            self.respond(response)?;
+            Request::Add { user, points } => { Some(Ok(db.update_infallible(user, points, u64::saturating_add)).into()) }
+            Request::Remove { user, points, force: false } => { Some(db.update_fallible(user, points, u64::checked_sub).ok_or(points).into()) } 
+            Request::Remove { user, points, force: true } => { Some(Ok(db.update_infallible(user, points, u64::saturating_sub)).into()) } 
+        })
+    }
+
+    fn try_start_send(&mut self, response: Response) -> Poll<(), ()> {
+        debug_assert!(self.buffer.is_none());
+
+        match self.io.start_send(response) {
+            Ok(AsyncSink::Ready) => { Ok(Async::Ready(())) }
+            Ok(AsyncSink::NotReady(response)) => {
+                self.buffer = Some(response);
+                Ok(Async::NotReady)
+            }
+            Err(e) => {
+                error!("{}: failed to send response: '{}'", self.id, e);
+                Err(())
+            }
+        }
+    }
+}
+
+impl Future for Client {
+    type Item = ();
+    type Error = ();
+
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        if let Some(response) = self.buffer.take() {
+            trace!("{}: trying to send buffered response...", self.id);
+
+            match self.try_start_send(response)? {
+                Async::Ready(()) => { trace!("{}: buffered response sent", self.id); }
+                Async::NotReady => {
+                    warn!("{}: failed to send buffered response", self.id);
+                    return Ok(Async::NotReady);
+                }
+            }
         }
 
-        return Ok(());
+        loop {
+            match self.io.poll() {
+                Ok(Async::Ready(Some(request))) => {
+                    match self.handle_request(request) {
+                        Ok(Some(response)) => {
+                            trace!("{}: handled request. sending response: '{:?}'", self.id, response);
+
+                            match self.try_start_send(response)? {
+                                Async::Ready(()) => { trace!("{}: response sent", self.id)}
+                                Async::NotReady => {
+                                    warn!("{}: failed to send response", self.id);
+                                    return Ok(Async::NotReady);
+                                }
+                            }
+                        }
+                        Ok(None) => { trace!("{}: handled request. no response", self.id); }
+                        Err(e) => {
+                            error!("{}: failed to handle request: '{}'", self.id, e);
+                            return Err(());
+                        }
+                    }
+                }
+                Ok(Async::Ready(None)) => {
+                    debug!("{}: disconnected", self.id);
+                    return Ok(Async::Ready(()));
+                }
+                Ok(Async::NotReady) => { return Ok(Async::NotReady); }
+                Err(e) => {
+                    error!("{}: failed to decode request: '{}'", self.id, e);
+                    return Err(());
+                }
+            }
+        }
     }
+}
 
-    fn respond(&mut self, response: Vec<u8>) -> Result<(), MyError> {
-        self.stream
-            .write(&response)
-            .map_err(|e| MyError::IoError(e))?;
-
-        return Ok(());
+impl Display for Id {
+    fn fmt(&self, fmt: &mut Formatter) -> fmt::Result {
+        match self {
+            Id::Connecting(addr) => { write!(fmt, "{}", addr) }
+            Id::Connected { addr, channel } => { write!(fmt, "{}@{}", addr, channel) }
+        }
     }
+}
 
-    fn handle_get_points(&mut self, buffer: Vec<u8>) -> Result<Option<Vec<u8>>, MyError> {
-        let user_id = parse_user_id(buffer.to_vec())?;
-
-        let (sender, receiver) = channel();
-
-        self.request_sender
-            .send(Command::GetPoints(GetPoints {
-                channel_name: self.channel_name.clone(),
-                user_id: user_id,
-                response_sender: sender,
-            }))
-            .unwrap();
-
-        let points: u64 = receiver.recv().unwrap();
-
-        return Ok(Some(u64_to_buf(points).to_vec()));
+impl From<db::Db> for Db {
+    fn from(db: db::Db) -> Self {
+        Db::Connecting(db)
     }
+}
 
-    fn handle_bulk_edit(&mut self, buffer: Vec<u8>) -> Result<Option<Vec<u8>>, MyError> {
-        // Read points from 4 first bytes
-        let points = buf_to_i32_unsafe(&buffer[0..4]);
-
-        // Read user ID into a string from remaining bytes
-        let user_ids = parse_user_id_bulk(buffer[4..].to_vec())?;
-
-        self.request_sender
-            .send(Command::BulkEdit(BulkEdit {
-                channel_name: self.channel_name.clone(),
-                user_ids: user_ids,
-                points: points,
-            }))
-            .unwrap();
-
-        return Ok(None);
-    }
-
-    fn handle_add(&mut self, buffer: Vec<u8>) -> Result<Option<Vec<u8>>, MyError> {
-        // Read points from 8 first bytes
-        let points = buf_to_u64(&buffer[0..8])?;
-
-        // Read user ID into a string from remaining bytes
-        let user_id = parse_user_id(buffer[8..].to_vec())?;
-
-        let (sender, receiver) = channel();
-
-        self.request_sender
-            .send(Command::Edit(Edit {
-                channel_name: self.channel_name.clone(),
-                user_id: user_id,
-                operation: Operation::Add,
-                value: points,
-                force: false,
-                response_sender: sender,
-            }))
-            .unwrap();
-
-        let mut response = Vec::new();
-
-        let (result_bool, user_points) = receiver.recv().unwrap();
-        let result = if result_bool { RESULT_OK } else { RESULT_ERR };
-
-        let user_points_buf = u64_to_buf(user_points);
-
-        response.push(result);
-        response.append(&mut user_points_buf.to_vec());
-
-        return Ok(Some(response));
-    }
-
-    fn handle_remove(&mut self, buffer: Vec<u8>) -> Result<Option<Vec<u8>>, MyError> {
-        let force = if buffer[0] == 0x01 { true } else { false };
-        // Read points from 8 first bytes
-        let points = buf_to_u64(&buffer[1..9])?;
-
-        // Read user ID into a string from remaining bytes
-        let user_id = parse_user_id(buffer[9..].to_vec())?;
-
-        let (sender, receiver) = channel();
-
-        self.request_sender
-            .send(Command::Edit(Edit {
-                channel_name: self.channel_name.clone(),
-                user_id: user_id,
-                operation: Operation::Remove,
-                value: points,
-                force: force,
-                response_sender: sender,
-            }))
-            .unwrap();
-
-        let mut response = Vec::new();
-
-        let (result_bool, user_points) = receiver.recv().unwrap();
-        let result = if result_bool { RESULT_OK } else { RESULT_ERR };
-
-        let user_points_buf = u64_to_buf(user_points);
-
-        response.push(result);
-        response.append(&mut user_points_buf.to_vec());
-
-        return Ok(Some(response));
+impl From<db::ChannelDb> for Db {
+    fn from(db: db::ChannelDb) -> Self {
+        Db::Connected(db)
     }
 }
