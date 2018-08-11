@@ -7,5 +7,6 @@ authors = ["Rasmus Karlsson <rasmus.karlsson@pajlada.com>"]
 serde = "1.0.70"
 serde_derive = "1.0.70"
 bincode = "1.0.1"
+chrono = "0.4"
 
 ctrlc = { version = "3.0", features = ["termination"] }

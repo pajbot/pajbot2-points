@@ -3,6 +3,10 @@ use std::net::TcpListener;
 use std::sync::mpsc::channel;
 use std::{io, process, thread, time};
 
+extern crate chrono;
+
+use chrono::prelude::*;
+
 use std::fs::{File, OpenOptions};
 use std::io::prelude::*;
 
@@ -102,7 +106,17 @@ fn edit_points(channel_points: &mut ChannelPointMap, user_id: String, points: i3
 }
 
 fn main() {
+    let utc: DateTime<Utc> = Utc::now(); // e.g. `2014-11-28T12:45:59.324310806Z`
     let mut points = load_points().unwrap();
+    let utc2 = Utc::now();
+
+    println!("Loading took {}", utc2 - utc);
+
+    println!("Database contains points for {} channels", points.len());
+
+    for (channel_name, channel_points) in &points {
+        println!("{} = {} users", channel_name, channel_points.len());
+    }
 
     let listener = TcpListener::bind(HOST).unwrap();
 
@@ -167,11 +181,42 @@ fn main() {
                             }
                         }
                     }
+                    Rank(c) => {
+                        let channel_points = points
+                            .entry(c.channel_name)
+                            .or_insert(ChannelPointMap::new());
+
+                        let user_points = get_points(channel_points, c.user_id.clone());
+                        let mut points: Vec<&u64> = Vec::new();
+                        for (_other_user_id, other_user_points) in channel_points {
+                            points.push(other_user_points);
+                        }
+                        points.sort();
+
+                        let mut rank = points.len() as u64;
+                        for other_user_points in points {
+                            if other_user_points < &user_points {
+                                rank -= 1;
+                            } else {
+                                break;
+                            }
+                        }
+
+                        println!("Responding with rank {}", rank);
+
+                        c.response_sender.send(rank).unwrap();
+                    }
                     SavePoints => {
+                        let utc: DateTime<Utc> = Utc::now(); // e.g. `2014-11-28T12:45:59.324310806Z`
                         save_points(&mut points).unwrap();
+                        let utc2 = Utc::now();
+                        println!("saving took {}", utc2 - utc);
                     }
                     Quit(sender) => {
+                        let utc: DateTime<Utc> = Utc::now(); // e.g. `2014-11-28T12:45:59.324310806Z`
                         save_points(&mut points).unwrap();
+                        let utc2 = Utc::now();
+                        println!("saving took {}", utc2 - utc);
                         sender.send(()).unwrap();
                         break;
                     }

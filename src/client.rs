@@ -1,3 +1,4 @@
+use chrono::prelude::*;
 use std::io::Write;
 use std::net::TcpStream;
 use std::sync::mpsc::channel;
@@ -43,12 +44,21 @@ pub struct Edit {
     pub response_sender: Sender<(bool, u64)>,
 }
 
+pub struct Rank {
+    pub channel_name: String,
+    pub user_id: String,
+
+    // Rank of user
+    pub response_sender: Sender<u64>,
+}
+
 pub enum Command {
     GetPoints(GetPoints),
     SavePoints,
     Quit(Sender<()>),
     BulkEdit(BulkEdit),
     Edit(Edit),
+    Rank(Rank),
 }
 
 pub struct Client {
@@ -102,11 +112,13 @@ impl Client {
         let (command, body_size) = read_header(&mut self.stream)?;
         let body = read_body(&mut self.stream, body_size as usize)?;
 
+        let start = Utc::now();
         if let Some(response) = match command {
             COMMAND_GET => self.handle_get_points(body.to_vec())?,
             COMMAND_BULK_EDIT => self.handle_bulk_edit(body.to_vec())?,
             COMMAND_ADD => self.handle_add(body.to_vec())?,
             COMMAND_REMOVE => self.handle_remove(body.to_vec())?,
+            COMMAND_RANK => self.handle_rank(body.to_vec())?,
             _ => {
                 println!("Unknown command {}", command);
                 None
@@ -114,6 +126,8 @@ impl Client {
         } {
             self.respond(response)?;
         }
+        let end = Utc::now();
+        println!("Handling command {} took {}", command, end - start);
 
         return Ok(());
     }
@@ -227,5 +241,24 @@ impl Client {
         response.append(&mut user_points_buf.to_vec());
 
         return Ok(Some(response));
+    }
+
+    fn handle_rank(&mut self, buffer: Vec<u8>) -> Result<Option<Vec<u8>>, MyError> {
+        // Read user ID into a string from remaining bytes
+        let user_id = parse_user_id(buffer.to_vec())?;
+
+        let (sender, receiver) = channel();
+
+        self.request_sender
+            .send(Command::Rank(Rank {
+                channel_name: self.channel_name.clone(),
+                user_id: user_id,
+                response_sender: sender,
+            }))
+            .unwrap();
+
+        let user_rank = receiver.recv().unwrap();
+
+        return Ok(Some(u64_to_buf(user_rank).to_vec()));
     }
 }
