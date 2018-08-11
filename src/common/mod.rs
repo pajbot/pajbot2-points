@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 mod custom_error;
 
 pub use self::custom_error::MyError;
@@ -17,6 +15,3 @@ pub const COMMAND_RANK: u8 = 0x06;
 
 pub const RESULT_OK: u8 = 0x00;
 pub const RESULT_ERR: u8 = 0x01;
-
-pub type ChannelPointMap = HashMap<String, u64>;
-pub type PointMap = HashMap<String, ChannelPointMap>;

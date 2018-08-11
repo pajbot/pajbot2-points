@@ -9,12 +9,14 @@ use parse::*;
 use read::*;
 use utils::*;
 
+#[derive(Debug)]
 pub struct GetPoints {
     pub channel_name: String,
     pub user_id: String,
     pub response_sender: Sender<u64>,
 }
 
+#[derive(Debug)]
 pub struct BulkEdit {
     pub channel_name: String,
 
@@ -24,11 +26,13 @@ pub struct BulkEdit {
     pub points: i32,
 }
 
+#[derive(Debug)]
 pub enum Operation {
     Add,
     Remove,
 }
 
+#[derive(Debug)]
 pub struct Edit {
     pub channel_name: String,
     pub user_id: String,
@@ -44,6 +48,7 @@ pub struct Edit {
     pub response_sender: Sender<(bool, u64)>,
 }
 
+#[derive(Debug)]
 pub struct Rank {
     pub channel_name: String,
     pub user_id: String,
@@ -52,6 +57,7 @@ pub struct Rank {
     pub response_sender: Sender<u64>,
 }
 
+#[derive(Debug)]
 pub enum Command {
     GetPoints(GetPoints),
     SavePoints,
@@ -113,6 +119,7 @@ impl Client {
         let body = read_body(&mut self.stream, body_size as usize)?;
 
         let start = Utc::now();
+        println!("Handle command {}...", command);
         if let Some(response) = match command {
             COMMAND_GET => self.handle_get_points(body.to_vec())?,
             COMMAND_BULK_EDIT => self.handle_bulk_edit(body.to_vec())?,
@@ -151,10 +158,9 @@ impl Client {
                 user_id: user_id,
                 response_sender: sender,
             }))
-            .unwrap();
+            .map_err(|e| MyError::SendError(e.to_string()))?;
 
-        let points: u64 = receiver.recv().unwrap();
-
+        let points = receiver.recv().map_err(|e| MyError::RecvError(e))?;
         return Ok(Some(u64_to_buf(points).to_vec()));
     }
 
